@@ -85,7 +85,7 @@ class BiosurveillanceSimulator:
                     ra_sickss.append([v for v in shedding_values if v is not None])
 
         sample_observations = 0
-        read_observations = 0
+        total_read_observations = 0  # Track total reads across all samples
 
         site_infos = [{"sample_sick": 0, "sample_total": 0} for _ in ra_sickss]
 
@@ -93,6 +93,18 @@ class BiosurveillanceSimulator:
             growth_factor ** processing_delay
             for processing_delay in self.params["processing_delays"]
         ]
+
+        # For discovery mode: calculate reads needed for 2x coverage
+        # reads_needed = (2 * genome_length) / insert_length * (1 / fraction_useful)
+        # But NAO's model uses: genome observed at 2x average coverage
+        # This means: total_useful_reads >= 2 * (genome_length / insert_length)
+        genome_length = self.params["genome_length_bp"]
+        insert_length = self.params["insert_length_bp"]
+        target_coverage = self.params.get("target_coverage", 2.0)
+        
+        # Number of reads needed to achieve target coverage
+        # Each read covers insert_length bp, need to cover genome target_coverage times
+        reads_for_coverage = target_coverage * genome_length / insert_length
 
         while True:
             day += 1
@@ -140,11 +152,13 @@ class BiosurveillanceSimulator:
 
                     if this_sample_obs > 0:
                         sample_observations += 1
-                        read_observations += this_sample_obs
+                        total_read_observations += this_sample_obs
 
+                    # DISCOVERY MODE: Check if we have enough reads for genome coverage
+                    # Need reads from at least 2 samples AND enough total reads for coverage
                     if (
                         sample_observations >= self.params["min_sample_observations"]
-                        and read_observations >= self.params["min_read_observations"]
+                        and total_read_observations >= reads_for_coverage
                     ):
                         incidence_at_detection = (
                             cumulative_incidence * processing_delay_factor
@@ -263,18 +277,19 @@ FIXED_PARAMS = {
     "sigma_shedding_values": 0.05,
     "shedding_duration": 5.0,
     "sigma_shedding_duration": 0.05,
-    "min_sample_observations": 2,
-    "min_read_observations": 2,
-    "genome_length_bp": 13_000,
+    "min_sample_observations": 2,  # Still need observations from 2+ samples
+    "genome_length_bp": 13_000,  # ~Influenza-sized genome
     "insert_length_bp": 170,
     "fraction_useful_reads": 0.50,
+    "target_coverage": 2.0,  # 2x coverage for discovery
 }
 
 
-def build_params(system_config: Dict, doubling_time: float) -> Dict:
+def build_params(system_config: Dict, doubling_time: float, target_coverage: float) -> Dict:
     """Build full parameter dict from user-editable system config."""
     params = dict(FIXED_PARAMS)
     params["doubling_time"] = doubling_time
+    params["target_coverage"] = target_coverage
     params["sample_populations"] = [
         system_config["nwss_catchment"],
         system_config["swab_catchment"],
@@ -318,14 +333,18 @@ def format_results(results: Dict, system_name: str) -> str:
 
 
 # Streamlit App
-st.set_page_config(page_title="Biosurveillance Simulator", layout="wide")
-st.title("🦠 Biosurveillance System Comparison")
+st.set_page_config(page_title="Biosurveillance Simulator (Discovery Mode)", layout="wide")
+
+st.title("🦠 Biosurveillance System Comparison - Discovery Mode")
 
 st.markdown("""
-This tool compares detection performance of different biosurveillance system configurations.
-Based on the [NAO's scenario simulator](https://github.com/naobservatory/scenario-simulator).
+This tool compares **discovery** performance (detecting novel/unknown pathogens) of different biosurveillance system configurations.
 
-**Sample types:** NWSS (municipal wastewater), Nasal Swabs, Triturators (airport waste), Individual Aircraft
+**Discovery vs Monitoring:**
+- **Monitoring**: Detecting known pathogens - just need a few matching reads
+- **Discovery**: Characterizing novel pathogens - need ~2x genome coverage to identify what it is
+
+Based on the [NAO's scenario simulator](https://github.com/naobservatory/scenario-simulator).
 """)
 
 # Global parameters
@@ -334,6 +353,7 @@ n_simulations = st.sidebar.slider("Number of simulations", 100, 10000, 1000, 100
 doubling_time = st.sidebar.slider("Pathogen doubling time (days)", 1.0, 14.0, 3.0, 0.5)
 p_bad = st.sidebar.slider("p_bad (game over threshold)", 0.05, 0.5, 0.3, 0.05)
 t_gov = st.sidebar.slider("T_gov (days for govt response)", 14.0, 90.0, 45.0, 1.0)
+target_coverage = st.sidebar.slider("Target genome coverage (x)", 1.0, 10.0, 2.0, 0.5)
 seed = st.sidebar.number_input("Random seed", value=123, step=1)
 
 st.sidebar.markdown("---")
@@ -342,7 +362,14 @@ st.sidebar.markdown("""
 - **p_bad**: Cumulative incidence that's "too late"
 - **T_gov**: Days government needs to mount response
 - **Doubling time**: How fast pathogen spreads
+- **Target coverage**: Genome coverage needed for discovery (2x = characterize novel pathogen)
 """)
+
+# Calculate reads needed for coverage
+genome_length = FIXED_PARAMS["genome_length_bp"]
+insert_length = FIXED_PARAMS["insert_length_bp"]
+reads_needed = int(target_coverage * genome_length / insert_length)
+st.sidebar.info(f"Reads needed for {target_coverage}x coverage of {genome_length:,}bp genome: **{reads_needed:,}**")
 
 # Two columns for the two systems
 col1, col2 = st.columns(2)
@@ -413,14 +440,14 @@ if st.button("🚀 Run Simulation", type="primary"):
     
     # System A
     status_text.text(f"Running {name_a}...")
-    params_a = build_params(system_a, doubling_time)
+    params_a = build_params(system_a, doubling_time, target_coverage)
     sim_a = BiosurveillanceSimulator(params_a, seed=seed)
     outcomes_a = sim_a.run_simulations(n_simulations, progress_callback=lambda p: progress_bar.progress(p * 0.5))
     results_a = analyze_outcomes(outcomes_a, p_bad, t_gov)
     
     # System B
     status_text.text(f"Running {name_b}...")
-    params_b = build_params(system_b, doubling_time)
+    params_b = build_params(system_b, doubling_time, target_coverage)
     sim_b = BiosurveillanceSimulator(params_b, seed=seed)
     outcomes_b = sim_b.run_simulations(n_simulations, progress_callback=lambda p: progress_bar.progress(0.5 + p * 0.5))
     results_b = analyze_outcomes(outcomes_b, p_bad, t_gov)
@@ -460,4 +487,4 @@ if st.button("🚀 Run Simulation", type="primary"):
     st.info(f"**Early enough for T_gov ({t_gov:.0f} days):** {name_a}: {t_gov_a:.1f}% | {name_b}: {t_gov_b:.1f}%")
 
 st.markdown("---")
-st.caption("Based on [NAO's scenario simulator](https://naobservatory.org/blog/simulating-approaches-to-metagenomic-pandemic-identification/). Parameters from NAO's Biothreat Radar proposal.")
+st.caption("Based on [NAO's scenario simulator](https://naobservatory.org/blog/simulating-approaches-to-metagenomic-pandemic-identification/). Discovery mode requires ~2x genome coverage vs monitoring which only needs a few reads.")
