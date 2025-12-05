@@ -389,7 +389,7 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("System A")
-    name_a = st.text_input("Name", "Current System (2024)", key="name_a")
+    name_a = st.text_input("Name", "Current System (2025)", key="name_a")
     
     st.markdown("**Catchment per Site × Number of Sites:**")
     c1, c2 = st.columns(2)
