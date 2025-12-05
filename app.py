@@ -368,7 +368,7 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("System A")
-    name_a = st.text_input("Name", "Current System (2024)", key="name_a")
+    name_a = st.text_input("Name", "Current System (2025)", key="name_a")
     
     st.markdown("**Catchment Sizes (people/day):**")
     nwss_a = st.number_input("NWSS Wastewater", 0, 50_000_000, CURRENT_DEFAULTS["nwss"], 100_000, key="nwss_a")
