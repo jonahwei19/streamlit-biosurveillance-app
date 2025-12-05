@@ -603,7 +603,7 @@ with st.expander("Run Exploration Analysis", expanded=False):
         help="Target fraction of runs with sufficient lead time"
     )   
 
-st.write(f"Selected target reliability: {target_reliability:.0%}")
+    st.write(f"Selected target reliability: {target_reliability:.0%}")
     
     exploration_sims = st.slider(
         "Simulations per configuration",
