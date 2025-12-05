@@ -593,12 +593,17 @@ sufficient lead time).
 """)
 
 with st.expander("Run Exploration Analysis", expanded=False):
+
     target_reliability = st.slider(
         "Target reliability",
-        min_value=0.5, max_value=0.95, value=0.80, step=0.05,
-        format="%.0f%%",
-        help="Target % of simulations that detect with sufficient lead time"
-    )
+        min_value=0.0,
+        max_value=1.0,
+        value=0.8,
+        step=0.01,
+        help="Target fraction of runs with sufficient lead time"
+    )   
+
+st.write(f"Selected target reliability: {target_reliability:.0%}")
     
     exploration_sims = st.slider(
         "Simulations per configuration",
