@@ -57,6 +57,7 @@ class SamplingStrategy:
     catchment_size: int
     processing_delay_days: float
     daily_read_depth: float
+    num_sites: int = 1
     ra_mode: str = "prevalence"
     ra_at_1pct_prevalence: float = 1e-7
     ra_per_sick_distribution: Optional[List[float]] = None
@@ -124,42 +125,44 @@ class BiosurveillanceSimulator:
             )
             
             for i, strategy in enumerate(system.strategies):
-                if strategy.catchment_size == 0:
+                if strategy.catchment_size == 0 or strategy.num_sites == 0:
                     continue
-                    
-                n_shedding = self.rng.binomial(
-                    strategy.catchment_size,
-                    min(1.0, prob_shedding)
-                )
                 
-                if n_shedding > 0:
-                    if strategy.ra_mode == "per_person" and strategy.ra_per_sick_distribution:
-                        if n_shedding > len(strategy.ra_per_sick_distribution) * 3:
-                            avg_ra = np.mean(strategy.ra_per_sick_distribution)
+                # Process each site independently
+                for site_idx in range(strategy.num_sites):
+                    n_shedding = self.rng.binomial(
+                        strategy.catchment_size,
+                        min(1.0, prob_shedding)
+                    )
+                    
+                    if n_shedding > 0:
+                        if strategy.ra_mode == "per_person" and strategy.ra_per_sick_distribution:
+                            if n_shedding > len(strategy.ra_per_sick_distribution) * 3:
+                                avg_ra = np.mean(strategy.ra_per_sick_distribution)
+                            else:
+                                sampled_ras = self.rng.choice(
+                                    strategy.ra_per_sick_distribution, 
+                                    size=n_shedding,
+                                    replace=True
+                                )
+                                avg_ra = np.mean(sampled_ras)
+                            
+                            sample_prevalence = n_shedding / strategy.catchment_size
+                            relative_abundance = sample_prevalence * avg_ra
                         else:
-                            sampled_ras = self.rng.choice(
-                                strategy.ra_per_sick_distribution, 
-                                size=n_shedding,
-                                replace=True
-                            )
-                            avg_ra = np.mean(sampled_ras)
+                            sample_prevalence = n_shedding / strategy.catchment_size
+                            relative_abundance = strategy.ra_at_1pct_prevalence * (sample_prevalence / 0.01)
                         
-                        sample_prevalence = n_shedding / strategy.catchment_size
-                        relative_abundance = sample_prevalence * avg_ra
-                    else:
-                        sample_prevalence = n_shedding / strategy.catchment_size
-                        relative_abundance = strategy.ra_at_1pct_prevalence * (sample_prevalence / 0.01)
-                    
-                    if strategy.sigma_ra > 0:
-                        noise = self.rng.lognormal(0, strategy.sigma_ra)
-                        relative_abundance = relative_abundance * noise
-                    
-                    expected_reads = strategy.daily_read_depth * relative_abundance
-                    actual_reads = self.rng.poisson(expected_reads) if expected_reads < 1e9 else int(expected_reads)
-                    
-                    if actual_reads > 0:
-                        total_samples_with_reads += 1
-                        total_reads += actual_reads
+                        if strategy.sigma_ra > 0:
+                            noise = self.rng.lognormal(0, strategy.sigma_ra)
+                            relative_abundance = relative_abundance * noise
+                        
+                        expected_reads = strategy.daily_read_depth * relative_abundance
+                        actual_reads = self.rng.poisson(expected_reads) if expected_reads < 1e9 else int(expected_reads)
+                        
+                        if actual_reads > 0:
+                            total_samples_with_reads += 1
+                            total_reads += actual_reads
                 
                 if (total_samples_with_reads >= system.min_samples_with_reads and
                     total_reads >= reads_needed):
@@ -236,8 +239,11 @@ class BiosurveillanceSimulator:
 # System Configuration Builders
 # =============================================================================
 
-def build_system(name: str, nwss_catchment: int, swab_catchment: int, 
-                 trit_catchment: int, plane_catchment: int,
+def build_system(name: str, 
+                 nwss_catchment: int, nwss_sites: int,
+                 swab_catchment: int, swab_sites: int,
+                 trit_catchment: int, trit_sites: int,
+                 plane_catchment: int, plane_sites: int,
                  nwss_delay: float, swab_delay: float, 
                  trit_delay: float, plane_delay: float) -> SystemConfig:
     """Build a system configuration from UI parameters."""
@@ -247,8 +253,9 @@ def build_system(name: str, nwss_catchment: int, swab_catchment: int,
             SamplingStrategy(
                 name="NWSS Wastewater",
                 catchment_size=nwss_catchment,
+                num_sites=nwss_sites,
                 processing_delay_days=nwss_delay,
-                daily_read_depth=24e9,
+                daily_read_depth=24e9 / max(1, nwss_sites),  # Split reads across sites
                 ra_mode="prevalence",
                 ra_at_1pct_prevalence=1e-7,
                 sigma_ra=0.5,
@@ -256,8 +263,9 @@ def build_system(name: str, nwss_catchment: int, swab_catchment: int,
             SamplingStrategy(
                 name="Nasal Swabs",
                 catchment_size=swab_catchment,
+                num_sites=swab_sites,
                 processing_delay_days=swab_delay,
-                daily_read_depth=2e9,
+                daily_read_depth=2e9 / max(1, swab_sites),
                 ra_mode="per_person",
                 ra_per_sick_distribution=SWAB_RA_DISTRIBUTION,
                 sigma_ra=0.05,
@@ -265,8 +273,9 @@ def build_system(name: str, nwss_catchment: int, swab_catchment: int,
             SamplingStrategy(
                 name="Triturators",
                 catchment_size=trit_catchment,
+                num_sites=trit_sites,
                 processing_delay_days=trit_delay,
-                daily_read_depth=188e9,
+                daily_read_depth=188e9 / max(1, trit_sites),
                 ra_mode="per_person",
                 ra_per_sick_distribution=[AIRPLANE_RA],
                 sigma_ra=0.5,
@@ -274,8 +283,9 @@ def build_system(name: str, nwss_catchment: int, swab_catchment: int,
             SamplingStrategy(
                 name="Individual Planes",
                 catchment_size=plane_catchment,
+                num_sites=plane_sites,
                 processing_delay_days=plane_delay,
-                daily_read_depth=12e9,
+                daily_read_depth=12e9 / max(1, plane_sites),
                 ra_mode="per_person",
                 ra_per_sick_distribution=[AIRPLANE_RA],
                 sigma_ra=0.5,
@@ -303,6 +313,11 @@ strategies. Based on the [Nucleic Acid Observatory's methodology](https://naobse
 **Two detection modes:**
 - **Monitoring**: Detecting *known* pathogens (need ~2 matching reads)
 - **Discovery**: Characterizing *novel* pathogens (need ~2× genome coverage ≈ 153 reads)
+
+**Key insight**: Different strategies scale differently:
+- **Wastewater**: Catchment size doesn't help much (prevalence cancels out). More *sites* helps with geographic coverage.
+- **Swabs**: Larger catchment helps a lot (need to catch sick people). Signal is strong per sick person.
+- **Airplane waste**: Between the two - moderate RA, benefits from more passengers.
 """)
 
 # =============================================================================
@@ -355,12 +370,18 @@ st.header("📊 System Configuration")
 
 # Default values for current and FY2026 systems
 CURRENT_DEFAULTS = {
-    "nwss": 1_000_000, "swab": 191, "trit": 0, "plane": 0,
+    "nwss": 200_000, "nwss_sites": 5,
+    "swab": 191, "swab_sites": 1,
+    "trit": 0, "trit_sites": 0,
+    "plane": 0, "plane_sites": 0,
     "nwss_delay": 7.0, "swab_delay": 5.0, "trit_delay": 5.0, "plane_delay": 5.0
 }
 
 FY2026_DEFAULTS = {
-    "nwss": 2_500_000, "swab": 5_200, "trit": 97_500, "plane": 4_500,
+    "nwss": 500_000, "nwss_sites": 5,
+    "swab": 400, "swab_sites": 13,
+    "trit": 7_500, "trit_sites": 13,
+    "plane": 2_250, "plane_sites": 2,
     "nwss_delay": 2.69, "swab_delay": 2.19, "trit_delay": 2.65, "plane_delay": 2.40
 }
 
@@ -368,35 +389,55 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("System A")
-    name_a = st.text_input("Name", "Current System (2025)", key="name_a")
+    name_a = st.text_input("Name", "Current System (2024)", key="name_a")
     
-    st.markdown("**Catchment Sizes (people/day):**")
-    nwss_a = st.number_input("NWSS Wastewater", 0, 50_000_000, CURRENT_DEFAULTS["nwss"], 100_000, key="nwss_a")
-    swab_a = st.number_input("Nasal Swabs", 0, 100_000, CURRENT_DEFAULTS["swab"], 100, key="swab_a")
-    trit_a = st.number_input("Triturators", 0, 1_000_000, CURRENT_DEFAULTS["trit"], 10_000, key="trit_a")
-    plane_a = st.number_input("Individual Planes", 0, 100_000, CURRENT_DEFAULTS["plane"], 1_000, key="plane_a")
+    st.markdown("**Catchment per Site × Number of Sites:**")
+    c1, c2 = st.columns(2)
+    with c1:
+        nwss_a = st.number_input("NWSS per site", 0, 5_000_000, CURRENT_DEFAULTS["nwss"], 50_000, key="nwss_a")
+        swab_a = st.number_input("Swabs per site", 0, 10_000, CURRENT_DEFAULTS["swab"], 50, key="swab_a")
+        trit_a = st.number_input("Trit. per site", 0, 50_000, CURRENT_DEFAULTS["trit"], 1_000, key="trit_a")
+        plane_a = st.number_input("Planes per site", 0, 20_000, CURRENT_DEFAULTS["plane"], 500, key="plane_a")
+    with c2:
+        nwss_sites_a = st.number_input("NWSS sites", 0, 100, CURRENT_DEFAULTS["nwss_sites"], 1, key="nwss_sites_a")
+        swab_sites_a = st.number_input("Swab sites", 0, 50, CURRENT_DEFAULTS["swab_sites"], 1, key="swab_sites_a")
+        trit_sites_a = st.number_input("Trit. sites", 0, 50, CURRENT_DEFAULTS["trit_sites"], 1, key="trit_sites_a")
+        plane_sites_a = st.number_input("Plane sites", 0, 20, CURRENT_DEFAULTS["plane_sites"], 1, key="plane_sites_a")
     
     st.markdown("**Processing Delays (days):**")
     delay_nwss_a = st.number_input("NWSS delay", 0.5, 14.0, CURRENT_DEFAULTS["nwss_delay"], 0.5, key="dnwss_a")
     delay_swab_a = st.number_input("Swab delay", 0.5, 14.0, CURRENT_DEFAULTS["swab_delay"], 0.5, key="dswab_a")
     delay_trit_a = st.number_input("Trit. delay", 0.5, 14.0, CURRENT_DEFAULTS["trit_delay"], 0.5, key="dtrit_a")
     delay_plane_a = st.number_input("Plane delay", 0.5, 14.0, CURRENT_DEFAULTS["plane_delay"], 0.5, key="dplane_a")
+    
+    total_a = nwss_a * nwss_sites_a + swab_a * swab_sites_a + trit_a * trit_sites_a + plane_a * plane_sites_a
+    st.info(f"**Total catchment**: {total_a:,}")
 
 with col2:
     st.subheader("System B")
     name_b = st.text_input("Name", "FY2026 Biothreat Radar", key="name_b")
     
-    st.markdown("**Catchment Sizes (people/day):**")
-    nwss_b = st.number_input("NWSS Wastewater", 0, 50_000_000, FY2026_DEFAULTS["nwss"], 100_000, key="nwss_b")
-    swab_b = st.number_input("Nasal Swabs", 0, 100_000, FY2026_DEFAULTS["swab"], 100, key="swab_b")
-    trit_b = st.number_input("Triturators", 0, 1_000_000, FY2026_DEFAULTS["trit"], 10_000, key="trit_b")
-    plane_b = st.number_input("Individual Planes", 0, 100_000, FY2026_DEFAULTS["plane"], 1_000, key="plane_b")
+    st.markdown("**Catchment per Site × Number of Sites:**")
+    c1, c2 = st.columns(2)
+    with c1:
+        nwss_b = st.number_input("NWSS per site", 0, 5_000_000, FY2026_DEFAULTS["nwss"], 50_000, key="nwss_b")
+        swab_b = st.number_input("Swabs per site", 0, 10_000, FY2026_DEFAULTS["swab"], 50, key="swab_b")
+        trit_b = st.number_input("Trit. per site", 0, 50_000, FY2026_DEFAULTS["trit"], 1_000, key="trit_b")
+        plane_b = st.number_input("Planes per site", 0, 20_000, FY2026_DEFAULTS["plane"], 500, key="plane_b")
+    with c2:
+        nwss_sites_b = st.number_input("NWSS sites", 0, 100, FY2026_DEFAULTS["nwss_sites"], 1, key="nwss_sites_b")
+        swab_sites_b = st.number_input("Swab sites", 0, 50, FY2026_DEFAULTS["swab_sites"], 1, key="swab_sites_b")
+        trit_sites_b = st.number_input("Trit. sites", 0, 50, FY2026_DEFAULTS["trit_sites"], 1, key="trit_sites_b")
+        plane_sites_b = st.number_input("Plane sites", 0, 20, FY2026_DEFAULTS["plane_sites"], 1, key="plane_sites_b")
     
     st.markdown("**Processing Delays (days):**")
     delay_nwss_b = st.number_input("NWSS delay", 0.5, 14.0, FY2026_DEFAULTS["nwss_delay"], 0.5, key="dnwss_b")
     delay_swab_b = st.number_input("Swab delay", 0.5, 14.0, FY2026_DEFAULTS["swab_delay"], 0.5, key="dswab_b")
     delay_trit_b = st.number_input("Trit. delay", 0.5, 14.0, FY2026_DEFAULTS["trit_delay"], 0.5, key="dtrit_b")
     delay_plane_b = st.number_input("Plane delay", 0.5, 14.0, FY2026_DEFAULTS["plane_delay"], 0.5, key="dplane_b")
+    
+    total_b = nwss_b * nwss_sites_b + swab_b * swab_sites_b + trit_b * trit_sites_b + plane_b * plane_sites_b
+    st.info(f"**Total catchment**: {total_b:,}")
 
 # =============================================================================
 # Run Simulations
@@ -406,11 +447,15 @@ if st.button("🚀 Run Simulation", type="primary", use_container_width=True):
     
     # Build systems
     system_a = build_system(
-        name_a, nwss_a, swab_a, trit_a, plane_a,
+        name_a, 
+        nwss_a, nwss_sites_a, swab_a, swab_sites_a,
+        trit_a, trit_sites_a, plane_a, plane_sites_a,
         delay_nwss_a, delay_swab_a, delay_trit_a, delay_plane_a
     )
     system_b = build_system(
-        name_b, nwss_b, swab_b, trit_b, plane_b,
+        name_b,
+        nwss_b, nwss_sites_b, swab_b, swab_sites_b,
+        trit_b, trit_sites_b, plane_b, plane_sites_b,
         delay_nwss_b, delay_swab_b, delay_trit_b, delay_plane_b
     )
     
@@ -550,14 +595,10 @@ sufficient lead time).
 with st.expander("Run Exploration Analysis", expanded=False):
     target_reliability = st.slider(
         "Target reliability",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.8,
-        step=0.01,
-        help="Target fraction of runs with sufficient lead time"
+        min_value=0.5, max_value=0.95, value=0.80, step=0.05,
+        format="%.0f%%",
+        help="Target % of simulations that detect with sufficient lead time"
     )
-
-    st.write(f"Selected target reliability: {target_reliability:.0%}")
     
     exploration_sims = st.slider(
         "Simulations per configuration",
@@ -586,10 +627,14 @@ with st.expander("Run Exploration Analysis", expanded=False):
                 
                 system = build_system(
                     f"NWSS×{nwss_scale}, Swabs×{swab_scale}",
-                    int(FY2026_DEFAULTS["nwss"] * nwss_scale),
-                    int(FY2026_DEFAULTS["swab"] * swab_scale),
-                    int(FY2026_DEFAULTS["trit"]),
-                    int(FY2026_DEFAULTS["plane"]),
+                    int(FY2026_DEFAULTS["nwss"] * nwss_scale),  # per site
+                    FY2026_DEFAULTS["nwss_sites"],
+                    int(FY2026_DEFAULTS["swab"] * swab_scale),  # per site
+                    FY2026_DEFAULTS["swab_sites"],
+                    FY2026_DEFAULTS["trit"],
+                    FY2026_DEFAULTS["trit_sites"],
+                    FY2026_DEFAULTS["plane"],
+                    FY2026_DEFAULTS["plane_sites"],
                     FY2026_DEFAULTS["nwss_delay"],
                     FY2026_DEFAULTS["swab_delay"],
                     FY2026_DEFAULTS["trit_delay"],
